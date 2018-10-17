@@ -179,7 +179,7 @@ def parse(html):
         for sub_infobox in infobox:
             if "overlap" not in sub_infobox.attrib["class"]:
                 prop_eles = sub_infobox.xpath("./dt")
-                value_eles = sub_infobox.xpath(".//dd")
+                value_eles = sub_infobox.xpath("./dd")
                 for prop_ele, value_ele in zip(prop_eles, value_eles):
                     prop_text = prop_ele.xpath("string(.)").strip().replace("\xa0", "")
                     value_text = value_ele.xpath("string(.)").strip()
@@ -209,7 +209,7 @@ def parse(html):
 def process_crawler():
     process = []
     num_cpus = multiprocessing.cpu_count()
-    print("将启动进程数为 ", num_cpus)
+    print("将启动进程数为 ", num_cpus - 2)
     for i in range(num_cpus):
         p = multiprocessing.Process(target=start)
         p.start()
