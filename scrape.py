@@ -6,6 +6,7 @@ import requests
 import re
 import multiprocessing
 import random
+from urllib import parse
 
 re_numbers = re.compile(r"\n\[[0-9]+-?[0-9]*\]\xa0\n")
 re_shouqi = re.compile(r"展开.*收起", re.DOTALL)
@@ -84,22 +85,30 @@ agents = [
 ]
 headers2 = headers = {'User-Agent': 'User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36'}
 headers = [headers1, headers2]
-baike_queue = MongoQueue("scrawler", "baidubaike")
+baike_queue = MongoQueue("scrawler", "baidubaike2")
 start_url = ["https://baike.baidu.com/item/%E5%88%98%E5%BE%B7%E5%8D%8E/114923",
         "https://baike.baidu.com/item/%E4%B8%AD%E5%9B%BD/1122445",
-        "https://baike.baidu.com/item/%E9%98%BF%E5%B0%94%E4%BC%AF%E7%89%B9%C2%B7%E7%88%B1%E5%9B%A0%E6%96%AF%E5%9D%A6/127535?fromtitle=%E7%88%B1%E5%9B%A0%E6%96%AF%E5%9D%A6&fromid=122624&fr=aladdin",
+        "https://baike.baidu.com/item/%E9%98%BF%E5%B0%94%E4%BC%AF%E7%89%B9%C2%B7%E7%88%B1%E5%9B%A0%E6%96%AF%E5%9D%A6/127535",
         "https://baike.baidu.com/item/%E6%95%B0%E5%AD%A6/107037?fr=aladdin",
         "https://baike.baidu.com/item/%E4%BD%93%E8%82%B2",
         "https://baike.baidu.com/item/%E7%BE%8E%E9%A3%9F",
         "https://baike.baidu.com/item/%E5%8C%BB%E5%AD%A6",
-        "https://baike.baidu.com/item/%E7%A7%91%E5%AD%A6%E6%8A%80%E6%9C%AF?fromtitle=%E7%A7%91%E6%8A%80&fromid=662906",
+        "https://baike.baidu.com/item/%E7%A7%91%E5%AD%A6%E6%8A%80%E6%9C%AF",
         "https://baike.baidu.com/item/%E8%8B%B9%E6%9E%9C/5670"
         ]
 
 adapter = requests.adapters.HTTPAdapter(max_retries=20)
+re_direct = re.compile("https://baike.baidu.com/item/(.+)/([0-9]+)\?fromtitle=(.+)&fromid=([0-9]+)")
+def redirect(url):
+    try:
+        ret = re.match(re_direct, url)
+        return (ret.group(1), ret.group(2), ret.group(3), ret.group(4))
+    except Exception:
+        return ("", "", "", "")
 def start():
     if baike_queue.db.count() == 0:
         for url in start_url:
+            url = parse.unquote(url, "utf-8")
             baike_queue.push(url)
     #if(baike_queue.db.count() == 0):
     #    baike_queue.push("https://baike.baidu.com/item/%E5%88%98%E5%BE%B7%E5%8D%8E/114923")
@@ -115,24 +124,43 @@ def start():
         else:
             head = agents[random.randint(0,61)]
             session.headers = head
-            html = session.get(url).content
-            html = html.decode("utf-8", "ignore")
-            title, abstract, props, values, tongyi, tag, duoyi = parse(html)
+            response = session.get(url)
+            cur_url = parse.unqoute(response.url, "utf-8")
+            html = response.content.decode("utf-8", "ignore")
+            title, abstract, props, values, tongyi, tag, duoyi, abstract_list, infobox_list, hrefs_list = parse(html)
+            redirect = ""
+            if(url != cur_url):
+                cur_title, cur_id, from_title, from_id = redirect(cur_url)
+                if(cur_title != "" && cur_id != "" && from_title != ""):
+                    title = from_title
+                    redirect = "https://baike.baidu.com/" + cur_title + "/" + cur_id
             #props = "[SEP]".join(props)
             #values = "[SEP]".join(values)
             #print(type(title), type(abstract), type(props), type(values))
-            baike_queue.complete(url, title, abstract, props, values, tongyi, tag, duoyi)
+            baike_queue.complete(url, title, abstract, props, values, tongyi, tag, duoyi, abstract_list, infobox_list, hrefs_list, redirect)
             #print('----------------------')
             
 def parse(html):
     tree = etree.HTML(html)
     hrefs = tree.xpath("//a[contains(@href, '/item/')]")
+    href_dict = dict()
     for ele in hrefs:
         target = ele.attrib["href"]
+        old_href = target
         if("http" in target or "force=1" in target):
             pass
         else:
             target = "https://baike.baidu.com" + target
+            target = parse.unquote(target, "utf-8")
+            target = target.strip("#ViewPageContent")
+            if("fromtitle" in target):
+                cur_title, cur_id, from_title, from_id = redirect(target)
+                target = "https://baike.baidu.com/" + from_title + "/" + from_id
+            if(old_href not in href_dict):
+                href_dict[old_href] = (target, 1)
+            else:
+                href_dict[old_href][1] += 1
+            href_dict[old_href] = target
             baike_queue.push(target)
     #get page title, abtract, infobox
     title = ""
@@ -152,7 +180,9 @@ def parse(html):
         duoyi_ele = tree.xpath("//ul[contains(@class, 'polysemantList-wrapper')]")
         for sub_ele in duoyi_ele:
             for ele in sub_ele.xpath(".//li/a"):
-                duoyi.append("https://baike.baidu.com" + ele.attrib["href"])
+                temp = ele.attrib["href"]
+                duoyi.append(href_dict[temp][0])
+
     except Exception as e:
         pass
     tag = []
@@ -166,14 +196,25 @@ def parse(html):
     except Exception:
         pass
     abstract = ""
+    abstract_dict = dict()
     try:
-        abstract = tree.xpath("//div[contains(@class, 'lemma-summary')]")[0]
-        abstract = abstract.xpath("string(.)").strip()
+        abstract_ele = tree.xpath("//div[contains(@class, 'lemma-summary')]")[0]
+        abstract = abstract_ele.xpath("string(.)").strip()
         abstract = abstract.replace("\xa0", "")
         abstract = re.sub(re_numbers, "", abstract)
+        abstract_hrefs = abstract_ele.xpath(".//a")
+        for ele in abstract_hrefs:
+            href = ele.attrib["href"]
+            entity = ele.text
+            true_href = href_dict[href][0]
+            if(true_href not in abstract_dict):
+                abstract_dict[true_href] = (entity, 1)
+            else:
+                abstract_dict[true_href][1] += 1
     except Exception as e:
         pass
     infoTriples = dict()
+    infobox_dict = dict()
     try:
         infobox = tree.xpath("//dl[contains(@class, 'basicInfo-block')]")
         for sub_infobox in infobox:
@@ -196,6 +237,15 @@ def parse(html):
                     value_text = value_text.strip("收起")
                     value_text = re.sub("\n+", "、", value_text)
                     infoTriples[prop_text] = value_text
+        infobox_hrefs = infobox.xpath(".//a")
+        for ele in infobox_hrefs:
+            temp = ele.attrib["href"]
+            entity = ele.text
+            true_href = href_dict[temp][0]
+            if(true_href not in infobox_dict):
+                infobox_dict[true_href] = (entity, 1)
+            else:
+                infobox_dict[true_href][1] += 1
     except Exception as e:
         pass
     props = []
@@ -203,13 +253,20 @@ def parse(html):
     for key, value in infoTriples.items():
         props.append(key)
         values.append(value)
-    return title, abstract, props, values, tongyi, tag, duoyi 
+    abstract_list = []
+    for key, value in abstract_dict.items():
+        abstract_list.append((key, value[0], value[1]))
+    infobox_list = []
+    for key, value in abstract_dict.item():
+        infobox_list.append((key, value[0], value[1]))
+    hrefs_list = href_dict.values()
+    return title, abstract, props, values, tongyi, tag, duoyi, abstract_list, infobox_list, hrefs_list 
 
 
 def process_crawler():
     process = []
     num_cpus = multiprocessing.cpu_count()
-    print("将启动进程数为 ", num_cpus - 2)
+    print("将启动进程数为 ", num_cpus)
     for i in range(num_cpus):
         p = multiprocessing.Process(target=start)
         p.start()
